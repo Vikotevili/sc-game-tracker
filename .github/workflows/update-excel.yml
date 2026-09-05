@@ -1,0 +1,39 @@
+name: Update game Excel
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/40 * * * *"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Scrape and write Excel
+        env:
+          GAME_BASE_URL: https://op.responsive.net/SupplyChain
+          GAME_INSTITUTION: nanyang
+          GAME_TEAM_ID: ${{ secrets.GAME_TEAM_ID }}
+          GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
+          PERIOD_DAYS: "3"
+          GIT_PUSH: "0"
+        run: python -m src.sync --no-push
+      - name: Commit workbook
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/supply_chain_game.xlsx data/latest.md
+          if git diff --cached --quiet; then
+            echo "No workbook changes"
+          else
+            git commit -m "Update game snapshot"
+            git push
+          fi
