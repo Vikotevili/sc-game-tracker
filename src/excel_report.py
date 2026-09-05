@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
@@ -26,6 +26,56 @@ THIN = Border(
     bottom=Side(style="thin", color="BFBFBF"),
 )
 
+SNAPSHOT_HEADERS = [
+    "抓取时间", "游戏日", "现金", "排名", "队伍数", "领先队伍", "距第一名差额",
+    "当前产能", "计划产能", "运输方式", "订货点", "批量",
+    "仓库库存", "在途", "WIP",
+    "当前周期", "周期需求", "周期缺货", "周期交付", "周期服务水平", "周期现金变动",
+]
+SNAPSHOT_FORMATS = [
+    None, "0", '"$"#,##0.00', "0", "0", None, '"$"#,##0.00',
+    "0.00", "0.00", None, "#,##0", "#,##0",
+    "#,##0.00", "#,##0.00", "#,##0.00",
+    "0", "#,##0.00", "#,##0.00", "#,##0.00", "0.0%", '"$"#,##0.00',
+]
+
+PERIOD_HEADERS = [
+    "周期", "起始日", "结束日", "天数", "是否完整", "接管后",
+    "需求", "缺货", "交付", "服务水平", "出货",
+    "期初现金", "期末现金", "现金变动",
+    "期末仓库库存", "平均仓库库存", "期末在途", "期末WIP", "估算收入",
+]
+PERIOD_FORMATS = [
+    "0", "0", "0", "0", None, None,
+    "#,##0.00", "#,##0.00", "#,##0.00", "0.0%", "#,##0.00",
+    '"$"#,##0.00', '"$"#,##0.00', '"$"#,##0.00',
+    "#,##0.00", "#,##0.00", "#,##0.00", "#,##0.00", '"$"#,##0.00',
+]
+
+DAILY_HEADERS = [
+    "游戏日", "接管后", "需求", "缺货", "交付", "服务水平", "出货",
+    "现金", "仓库库存", "在途邮件", "在途卡车", "在途合计", "WIP", "估算收入",
+]
+DAILY_FORMATS = [
+    "0", None, "#,##0.00", "#,##0.00", "#,##0.00", "0.0%", "#,##0.00",
+    '"$"#,##0.00', "#,##0.00", "#,##0.00", "#,##0.00", "#,##0.00", "#,##0.00", '"$"#,##0.00',
+]
+
+CASH_HEADERS = ["抓取时间", "游戏日", "项目", "金额", "类型"]
+CASH_FORMATS = [None, "0", None, '"$"#,##0.00', None]
+
+PARAM_HEADERS = [
+    "抓取时间", "游戏日", "工厂地区", "当前产能", "计划产能", "工厂运输",
+    "订货点", "批量", "仓库运输", "是否运营",
+]
+PARAM_FORMATS = [None, "0", None, "0.00", "0.00", None, "#,##0", "#,##0", None, None]
+
+HISTORY_HEADERS = ["游戏日", "参数", "参数(短)", "工厂", "仓库", "新值"]
+HISTORY_FORMATS = ["0.00", None, None, None, None, "#,##0.00"]
+
+STANDING_HEADERS = ["抓取时间", "游戏日", "排名", "队伍", "现金"]
+STANDING_FORMATS = [None, "0", "0", None, '"$"#,##0.00']
+
 
 def _style_header(ws: Worksheet, row: int, cols: int) -> None:
     for col in range(1, cols + 1):
@@ -34,13 +84,16 @@ def _style_header(ws: Worksheet, row: int, cols: int) -> None:
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = THIN
+    ws.row_dimensions[row].height = 22
+    ws.freeze_panes = f"A{row + 1}"
+    ws.auto_filter.ref = f"A{row}:{get_column_letter(cols)}{row}"
 
 
 def _autosize(ws: Worksheet, min_width: int = 10, max_width: int = 36) -> None:
     for col in ws.columns:
         letter = get_column_letter(col[0].column)
         width = min_width
-        for cell in col:
+        for cell in col[:80]:
             value = "" if cell.value is None else str(cell.value)
             width = max(width, min(max_width, len(value) + 2))
         ws.column_dimensions[letter].width = width
@@ -64,35 +117,131 @@ def _service_fill(value: float | None) -> PatternFill | None:
     return BAD_FILL
 
 
-def _write_table(ws: Worksheet, start_row: int, headers: list[str], rows: list[list[Any]], formats: list[str | None]) -> None:
+def _as_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _norm(value: Any) -> Any:
+    number = _as_int(value)
+    if number is not None and isinstance(value, (int, float)):
+        return number
+    return value
+
+
+def _last_used_row(ws: Worksheet, col: int = 1, header_row: int = 1) -> int:
+    last = header_row
+    for row in range(header_row + 1, (ws.max_row or header_row) + 1):
+        if ws.cell(row, col).value not in (None, ""):
+            last = row
+    return last
+
+
+def _find_row(ws: Worksheet, col: int, key: Any, header_row: int = 1) -> int | None:
+    want = _norm(key)
+    for row in range(header_row + 1, (ws.max_row or header_row) + 1):
+        if _norm(ws.cell(row, col).value) == want:
+            return row
+    return None
+
+
+def _write_row(
+    ws: Worksheet,
+    row: int,
+    values: list[Any],
+    formats: list[str | None],
+    headers: list[str],
+) -> None:
+    for col, value in enumerate(values, start=1):
+        cell = ws.cell(row, col, value)
+        cell.border = THIN
+        cell.alignment = Alignment(vertical="center")
+        fmt = formats[col - 1] if col - 1 < len(formats) else None
+        if fmt and isinstance(value, (int, float)):
+            cell.number_format = fmt
+        header = headers[col - 1] if col - 1 < len(headers) else ""
+        if str(header).endswith("服务水平") and isinstance(value, float):
+            fill = _service_fill(value)
+            if fill:
+                cell.fill = fill
+        elif row % 2 == 0:
+            cell.fill = ALT_FILL
+    end = get_column_letter(len(headers))
+    ws.auto_filter.ref = f"A1:{end}{max(row, 1)}"
+
+
+def _ensure_sheet(wb, name: str, headers: list[str]) -> Worksheet:
+    if name in wb.sheetnames:
+        ws = wb[name]
+        first = ws.cell(1, 1).value
+        last = ws.cell(1, len(headers)).value
+        if first == headers[0] and last == headers[-1]:
+            return ws
+        backup = f"{name}_旧版"
+        if backup not in wb.sheetnames:
+            ws.title = backup
+    ws = wb.create_sheet(name)
     for idx, header in enumerate(headers, start=1):
-        ws.cell(start_row, idx, header)
-    _style_header(ws, start_row, len(headers))
-    for r_idx, row in enumerate(rows, start=start_row + 1):
-        for c_idx, value in enumerate(row, start=1):
-            cell = ws.cell(r_idx, c_idx, value)
-            cell.border = THIN
-            cell.alignment = Alignment(vertical="center")
-            fmt = formats[c_idx - 1] if c_idx - 1 < len(formats) else None
-            if fmt and isinstance(value, (int, float)):
-                cell.number_format = fmt
-            if headers[c_idx - 1].endswith("服务水平") and isinstance(value, float):
-                fill = _service_fill(value)
-                if fill:
-                    cell.fill = fill
-            elif r_idx % 2 == 0:
-                cell.fill = ALT_FILL
-    ws.auto_filter.ref = f"A{start_row}:{get_column_letter(len(headers))}{start_row + len(rows)}"
-    ws.freeze_panes = f"A{start_row + 1}"
-    ws.row_dimensions[start_row].height = 22
+        ws.cell(1, idx, header)
+    _style_header(ws, 1, len(headers))
+    return ws
 
 
-def write_excel(report: dict[str, Any], path: Path = EXCEL_PATH) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
+def _period_values(item: dict[str, Any]) -> list[Any]:
+    return [
+        item["period"],
+        item["start_day"],
+        item["end_day"],
+        item["days_in_period"],
+        "是" if item["complete"] else "否",
+        "是" if item["after_takeover"] else "否",
+        item["demand"],
+        item["lost_demand"],
+        item["filled"],
+        item["service_level"],
+        item["shipments"],
+        item["cash_start"],
+        item["cash_end"],
+        item["cash_change"],
+        item["inventory_end"],
+        item["inventory_avg"],
+        item["pipeline_end"],
+        item["wip_end"],
+        item["est_revenue"],
+    ]
 
-    ws = wb.active
-    ws.title = "概览"
+
+def _daily_values(item: dict[str, Any]) -> list[Any]:
+    return [
+        item["day"],
+        "是" if item["after_takeover"] else "否",
+        item["demand"],
+        item["lost_demand"],
+        item["filled"],
+        item["service_level"],
+        item["shipments"],
+        item["cash"],
+        item["inventory"],
+        item["pipeline_mail"],
+        item["pipeline_truck"],
+        item["pipeline"],
+        item["wip"],
+        item["est_revenue"],
+    ]
+
+
+def _write_overview(wb, report: dict[str, Any]) -> None:
+    if "概览" in wb.sheetnames:
+        index = wb.sheetnames.index("概览")
+        del wb["概览"]
+        ws = wb.create_sheet("概览", index)
+    else:
+        ws = wb.create_sheet("概览", 0)
+
     header = report["header"]
     rank = report["rank"]
     factory = report["factory"]
@@ -101,10 +250,10 @@ def write_excel(report: dict[str, Any], path: Path = EXCEL_PATH) -> Path:
     current = report["current_period"] or {}
     last_complete = report["last_complete_period"] or {}
 
-    ws["A1"] = "Supply Chain Game 运营看板"
+    ws["A1"] = "Supply Chain Game 运营看板（最新）"
     ws["A1"].font = TITLE_FONT
     ws.merge_cells("A1:D1")
-    ws["A2"] = "按游戏日每 3 天一个周期汇总；图表数据来自游戏官方 plot / standing / cash / history 页面。"
+    ws["A2"] = "本页只显示最新状态。历史抓取、每日和三日周期都是追加，不会覆盖已有行。"
     ws.merge_cells("A2:D2")
 
     row = 4
@@ -151,160 +300,224 @@ def write_excel(report: dict[str, Any], path: Path = EXCEL_PATH) -> Path:
     ws.cell(row, 1, "上一完整 3 日周期").font = TITLE_FONT
     row += 1
     row = _write_kv(ws, row, "周期编号", last_complete.get("period"))
-    row = _write_kv(ws, row, "覆盖游戏日", f"{last_complete.get('start_day')}–{last_complete.get('end_day')}" if last_complete else None)
-    row = _write_kv(ws, row, "需求 / 缺货 / 交付", last_complete and f"{last_complete.get('demand')} / {last_complete.get('lost_demand')} / {last_complete.get('filled')}")
+    row = _write_kv(
+        ws,
+        row,
+        "覆盖游戏日",
+        f"{last_complete.get('start_day')}–{last_complete.get('end_day')}" if last_complete else None,
+    )
+    row = _write_kv(
+        ws,
+        row,
+        "需求 / 缺货 / 交付",
+        last_complete and f"{last_complete.get('demand')} / {last_complete.get('lost_demand')} / {last_complete.get('filled')}",
+    )
     row = _write_kv(ws, row, "服务水平", last_complete.get("service_level"), "0.0%")
     row = _write_kv(ws, row, "现金变动", last_complete.get("cash_change"), '"$"#,##0.00')
 
     row += 2
     ws.cell(row, 1, "说明").font = LABEL_FONT
-    ws.cell(row + 1, 1, "游戏速度约 1 游戏日 / 14 分钟，3 个游戏日约 42 分钟。脚本每 15 分钟刷新一次，并把完整历史重写成 Excel。")
+    ws.cell(row + 1, 1, "时间序列请看「快照历史」「每日数据」「三日周期」。每次抓取只追加新行；已完成的历史行不会被改写。")
     ws.merge_cells(start_row=row + 1, start_column=1, end_row=row + 1, end_column=4)
-    ws.cell(row + 2, 1, "「三日周期」按游戏日 1–3、4–6 … 切片。Day 730 起为你们接管后的区间。现金序列已按当前现金校准。")
-    ws.merge_cells(start_row=row + 2, start_column=1, end_row=row + 2, end_column=4)
     _autosize(ws, 16, 42)
     ws.column_dimensions["B"].width = 28
 
-    ws_p = wb.create_sheet("三日周期")
-    period_headers = [
-        "周期", "起始日", "结束日", "天数", "是否完整", "接管后",
-        "需求", "缺货", "交付", "服务水平", "出货",
-        "期初现金", "期末现金", "现金变动",
-        "期末仓库库存", "平均仓库库存", "期末在途", "期末WIP", "估算收入",
+
+def _append_snapshot(ws: Worksheet, report: dict[str, Any]) -> None:
+    header = report["header"]
+    rank = report["rank"]
+    factory = report["factory"]
+    stock = report["stock"]
+    current = report["current_period"] or {}
+    last = _last_used_row(ws)
+    if last > 1 and ws.cell(last, 1).value == report["fetched_at"]:
+        return
+    if last > 1:
+        same_day = _as_int(ws.cell(last, 2).value) == report["day"]
+        same_cash = ws.cell(last, 3).value == header.get("cash")
+        same_rank = _as_int(ws.cell(last, 4).value) == rank.get("rank")
+        same_inv = ws.cell(last, 13).value == stock.get("inventory")
+        if same_day and same_cash and same_rank and same_inv:
+            return
+    values = [
+        report["fetched_at"],
+        report["day"],
+        header.get("cash"),
+        rank.get("rank"),
+        rank.get("teams"),
+        rank.get("leader_team"),
+        rank.get("gap_to_leader"),
+        factory.get("current_capacity"),
+        factory.get("scheduled_capacity"),
+        factory.get("shipping"),
+        factory.get("order_point"),
+        factory.get("order_quantity"),
+        stock.get("inventory"),
+        stock.get("pipeline"),
+        stock.get("wip"),
+        current.get("period"),
+        current.get("demand"),
+        current.get("lost_demand"),
+        current.get("filled"),
+        current.get("service_level"),
+        current.get("cash_change"),
     ]
-    period_rows = []
+    _write_row(ws, last + 1, values, SNAPSHOT_FORMATS, SNAPSHOT_HEADERS)
+
+
+def _upsert_periods(ws: Worksheet, report: dict[str, Any]) -> None:
+    current_day = report["day"]
     for item in report["periods"]:
-        period_rows.append([
-            item["period"],
-            item["start_day"],
-            item["end_day"],
-            item["days_in_period"],
-            "是" if item["complete"] else "否",
-            "是" if item["after_takeover"] else "否",
-            item["demand"],
-            item["lost_demand"],
-            item["filled"],
-            item["service_level"],
-            item["shipments"],
-            item["cash_start"],
-            item["cash_end"],
-            item["cash_change"],
-            item["inventory_end"],
-            item["inventory_avg"],
-            item["pipeline_end"],
-            item["wip_end"],
-            item["est_revenue"],
-        ])
-    _write_table(
-        ws_p,
-        1,
-        period_headers,
-        period_rows,
-        [
-            "0", "0", "0", "0", None, None,
-            "#,##0.00", "#,##0.00", "#,##0.00", "0.0%", "#,##0.00",
-            '"$"#,##0.00', '"$"#,##0.00', '"$"#,##0.00',
-            "#,##0.00", "#,##0.00", "#,##0.00", "#,##0.00", '"$"#,##0.00',
-        ],
-    )
-    _autosize(ws_p, 10, 16)
+        row = _find_row(ws, 1, item["period"])
+        if row is None:
+            _write_row(ws, _last_used_row(ws) + 1, _period_values(item), PERIOD_FORMATS, PERIOD_HEADERS)
+            continue
+        complete = ws.cell(row, 5).value == "是"
+        if complete:
+            continue
+        if item["complete"] or item["end_day"] >= current_day or item["period"] == (report["current_period"] or {}).get("period"):
+            _write_row(ws, row, _period_values(item), PERIOD_FORMATS, PERIOD_HEADERS)
 
-    ws_d = wb.create_sheet("每日数据")
-    daily_headers = [
-        "游戏日", "接管后", "需求", "缺货", "交付", "服务水平", "出货",
-        "现金", "仓库库存", "在途邮件", "在途卡车", "在途合计", "WIP", "估算收入",
-    ]
-    daily_rows = []
+
+def _upsert_daily(ws: Worksheet, report: dict[str, Any]) -> None:
+    current_day = report["day"]
     for item in report["daily"]:
-        daily_rows.append([
-            item["day"],
-            "是" if item["after_takeover"] else "否",
-            item["demand"],
-            item["lost_demand"],
-            item["filled"],
-            item["service_level"],
-            item["shipments"],
-            item["cash"],
-            item["inventory"],
-            item["pipeline_mail"],
-            item["pipeline_truck"],
-            item["pipeline"],
-            item["wip"],
-            item["est_revenue"],
-        ])
-    _write_table(
-        ws_d,
-        1,
-        daily_headers,
-        daily_rows,
-        [
-            "0", None, "#,##0.00", "#,##0.00", "#,##0.00", "0.0%", "#,##0.00",
-            '"$"#,##0.00', "#,##0.00", "#,##0.00", "#,##0.00", "#,##0.00", "#,##0.00", '"$"#,##0.00',
-        ],
-    )
-    _autosize(ws_d, 10, 14)
+        row = _find_row(ws, 1, item["day"])
+        if row is None:
+            _write_row(ws, _last_used_row(ws) + 1, _daily_values(item), DAILY_FORMATS, DAILY_HEADERS)
+        elif item["day"] == current_day:
+            _write_row(ws, row, _daily_values(item), DAILY_FORMATS, DAILY_HEADERS)
 
-    ws_c = wb.create_sheet("资金构成")
-    cash_rows = [[item["description"], item["amount"], item["kind"]] for item in report["cash_status"]]
-    _write_table(ws_c, 1, ["项目", "金额", "类型"], cash_rows, [None, '"$"#,##0.00', None])
-    _autosize(ws_c, 18, 40)
 
-    ws_s = wb.create_sheet("运营参数")
-    ws_s["A1"] = "工厂"
-    ws_s["A1"].font = TITLE_FONT
-    factory_headers = ["地区", "当前产能", "计划产能", "运输方式", "订货点", "批量", "优先级", "是否运营"]
-    factory_rows = [[
-        item.get("region_name"),
-        item.get("current_capacity"),
-        item.get("scheduled_capacity"),
-        item.get("shipping"),
-        item.get("order_point"),
-        item.get("order_quantity"),
-        item.get("priority"),
-        "是" if item.get("operational") else "否",
-    ] for item in [report["factory"]] if item]
-    _write_table(ws_s, 3, factory_headers, factory_rows, [None, "0.00", "0.00", None, "#,##0", "#,##0", "0", None])
-    ws_s["A7"] = "仓库"
-    ws_s["A7"].font = TITLE_FONT
-    warehouse_headers = ["地区", "运输方式", "订货点", "批量", "优先级", "是否运营"]
-    warehouse_rows = [[
-        item.get("region_name"),
-        item.get("shipping"),
-        item.get("order_point"),
-        item.get("order_quantity"),
-        item.get("priority"),
-        "是" if item.get("operational") else "否",
-    ] for item in [report["warehouse"]] if item]
-    _write_table(ws_s, 9, warehouse_headers, warehouse_rows, [None, None, "#,##0", "#,##0", "0", None])
-    _autosize(ws_s, 12, 18)
+def _append_cash(ws: Worksheet, report: dict[str, Any]) -> None:
+    last = _last_used_row(ws)
+    if last > 1 and ws.cell(last, 1).value == report["fetched_at"]:
+        return
+    for item in report["cash_status"]:
+        last += 1
+        _write_row(
+            ws,
+            last,
+            [report["fetched_at"], report["day"], item["description"], item["amount"], item["kind"]],
+            CASH_FORMATS,
+            CASH_HEADERS,
+        )
 
-    ws_h = wb.create_sheet("决策历史")
-    history_rows = [[
-        item.get("day"),
-        item.get("parameter"),
-        item.get("parameter_short"),
-        item.get("factory"),
-        item.get("warehouse"),
-        item.get("new_value"),
-    ] for item in report["history"]]
-    _write_table(
-        ws_h,
-        1,
-        ["游戏日", "参数", "参数(短)", "工厂", "仓库", "新值"],
-        history_rows,
-        ["0.00", None, None, None, None, "#,##0.00"],
-    )
-    _autosize(ws_h, 12, 48)
 
-    ws_r = wb.create_sheet("排行榜")
-    standing_rows = [[item["rank"], item["team"], item["cash"]] for item in report["standing"]]
-    _write_table(ws_r, 1, ["排名", "队伍", "现金"], standing_rows, ["0", None, '"$"#,##0.00'])
-    my_team = header.get("team")
-    for excel_row, item in enumerate(report["standing"], start=2):
+def _append_params(ws: Worksheet, report: dict[str, Any]) -> None:
+    factory = report["factory"]
+    warehouse = report["warehouse"]
+    last = _last_used_row(ws)
+    values = [
+        report["fetched_at"],
+        report["day"],
+        factory.get("region_name"),
+        factory.get("current_capacity"),
+        factory.get("scheduled_capacity"),
+        factory.get("shipping"),
+        factory.get("order_point"),
+        factory.get("order_quantity"),
+        warehouse.get("shipping"),
+        "是" if factory.get("operational") else "否",
+    ]
+    if last > 1:
+        prev = [ws.cell(last, col).value for col in range(3, 11)]
+        if prev == values[2:]:
+            return
+    _write_row(ws, last + 1, values, PARAM_FORMATS, PARAM_HEADERS)
+
+
+def _append_history(ws: Worksheet, report: dict[str, Any]) -> None:
+    seen: set[tuple[Any, ...]] = set()
+    for row in range(2, _last_used_row(ws) + 1):
+        seen.add(tuple(_norm(ws.cell(row, col).value) for col in range(1, 7)))
+    last = _last_used_row(ws)
+    for item in report["history"]:
+        values = [
+            item.get("day"),
+            item.get("parameter"),
+            item.get("parameter_short"),
+            item.get("factory"),
+            item.get("warehouse"),
+            item.get("new_value"),
+        ]
+        key = tuple(_norm(v) for v in values)
+        if key in seen:
+            continue
+        last += 1
+        seen.add(key)
+        _write_row(ws, last, values, HISTORY_FORMATS, HISTORY_HEADERS)
+
+
+def _append_standing(ws: Worksheet, report: dict[str, Any]) -> None:
+    last = _last_used_row(ws)
+    if last > 1 and ws.cell(last, 1).value == report["fetched_at"]:
+        return
+    my_team = report["header"].get("team")
+    for item in report["standing"]:
+        last += 1
+        _write_row(
+            ws,
+            last,
+            [report["fetched_at"], report["day"], item["rank"], item["team"], item["cash"]],
+            STANDING_FORMATS,
+            STANDING_HEADERS,
+        )
         if item["team"] == my_team:
-            for col in range(1, 4):
-                ws_r.cell(excel_row, col).fill = WARN_FILL
-    _autosize(ws_r, 12, 28)
+            for col in range(1, 6):
+                ws.cell(last, col).fill = WARN_FILL
 
-    wb.save(path)
-    return path
+
+def _open_workbook(path: Path):
+    if path.exists():
+        return load_workbook(path)
+    wb = Workbook()
+    default = wb.active
+    default.title = "概览"
+    return wb
+
+
+def _save_workbook(wb, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        wb.save(path)
+        return path
+    except PermissionError:
+        fallback = path.with_name(path.stem + "_pending.xlsx")
+        wb.save(fallback)
+        return fallback
+
+
+def write_excel(report: dict[str, Any], path: Path = EXCEL_PATH) -> Path:
+    wb = _open_workbook(path)
+    _write_overview(wb, report)
+
+    snapshot = _ensure_sheet(wb, "快照历史", SNAPSHOT_HEADERS)
+    _append_snapshot(snapshot, report)
+    _autosize(snapshot, 12, 22)
+
+    periods = _ensure_sheet(wb, "三日周期", PERIOD_HEADERS)
+    _upsert_periods(periods, report)
+    _autosize(periods, 10, 16)
+
+    daily = _ensure_sheet(wb, "每日数据", DAILY_HEADERS)
+    _upsert_daily(daily, report)
+    _autosize(daily, 10, 14)
+
+    cash = _ensure_sheet(wb, "资金构成", CASH_HEADERS)
+    _append_cash(cash, report)
+    _autosize(cash, 14, 36)
+
+    params = _ensure_sheet(wb, "运营参数", PARAM_HEADERS)
+    _append_params(params, report)
+    _autosize(params, 12, 18)
+
+    history = _ensure_sheet(wb, "决策历史", HISTORY_HEADERS)
+    _append_history(history, report)
+    _autosize(history, 12, 48)
+
+    standing = _ensure_sheet(wb, "排行榜", STANDING_HEADERS)
+    _append_standing(standing, report)
+    _autosize(standing, 12, 28)
+
+    return _save_workbook(wb, path)
