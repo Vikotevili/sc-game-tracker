@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import subprocess
@@ -8,20 +9,48 @@ from pathlib import Path
 from .config import ROOT, git_branch, git_remote
 
 
-def find_git() -> str | None:
-    found = shutil.which("git")
-    if found:
-        return found
-    candidates = [
-        r"C:\Program Files\Git\cmd\git.exe",
-        r"C:\Program Files\Git\bin\git.exe",
-        r"C:\Program Files (x86)\Git\cmd\git.exe",
-        str(Path.home() / r"AppData\Local\Programs\Git\cmd\git.exe"),
-    ]
+def _first_existing(candidates: list[str]) -> str | None:
     for path in candidates:
-        if Path(path).exists():
+        if path and Path(path).exists():
             return path
     return None
+
+
+def find_git() -> str | None:
+    return shutil.which("git") or _first_existing(
+        [
+            r"C:\Program Files\Git\cmd\git.exe",
+            r"C:\Program Files\Git\bin\git.exe",
+            r"C:\Program Files (x86)\Git\cmd\git.exe",
+            str(Path.home() / r"AppData\Local\Programs\Git\cmd\git.exe"),
+        ]
+    )
+
+
+def find_gh() -> str | None:
+    return shutil.which("gh") or _first_existing(
+        [
+            r"C:\Program Files\GitHub CLI\gh.exe",
+            str(Path.home() / r"AppData\Local\Programs\GitHub CLI\gh.exe"),
+        ]
+    )
+
+
+def github_push_args() -> list[str]:
+    gh = find_gh()
+    if not gh:
+        return []
+    token = subprocess.run(
+        [gh, "auth", "token"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    value = token.stdout.strip()
+    if token.returncode != 0 or not value:
+        return []
+    encoded = base64.b64encode(f"x-access-token:{value}".encode()).decode()
+    return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {encoded}"]
 
 
 def _run(git: str, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -87,7 +116,7 @@ def commit_and_push(paths: list[Path], message: str, do_push: bool) -> dict[str,
     if not has_remote(git):
         return {"status": "committed", "reason": "no_remote"}
 
-    push = _run(git, ["push", "-u", git_remote(), git_branch()], check=False)
+    push = _run(git, github_push_args() + ["push", "-u", git_remote(), git_branch()], check=False)
     if push.returncode != 0:
         return {
             "status": "committed",
