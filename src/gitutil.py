@@ -94,6 +94,9 @@ def commit_and_push(paths: list[Path], message: str, do_push: bool) -> dict[str,
         return {"status": "skipped", "reason": "git_not_installed"}
 
     ensure_repo(git)
+    if not do_push:
+        return {"status": "written", "reason": "push_disabled"}
+
     for path in paths:
         rel = path.resolve().relative_to(ROOT)
         _run(git, ["add", "--", str(rel).replace("\\", "/")], check=False)
@@ -110,9 +113,6 @@ def commit_and_push(paths: list[Path], message: str, do_push: bool) -> dict[str,
             "reason": "commit_failed",
             "detail": (commit.stderr or commit.stdout).strip(),
         }
-
-    if not do_push:
-        return {"status": "committed", "reason": "push_disabled"}
     if not has_remote(git):
         return {"status": "committed", "reason": "no_remote"}
 

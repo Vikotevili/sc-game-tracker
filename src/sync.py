@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import traceback
 from datetime import datetime, timezone
 
-from .config import EXCEL_PATH, SNAPSHOT_DIR, STATE_PATH, git_push_enabled, period_days
+from .config import DATA_DIR, EXCEL_PATH, SNAPSHOT_DIR, STATE_PATH, git_push_enabled, period_days
 from .excel_report import write_excel
 from .gitutil import commit_and_push
 from .scrape import fetch_all
@@ -69,12 +70,24 @@ def run(push: bool | None = None) -> dict:
     }
 
 
+def _log(line: str) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    with (DATA_DIR / "sync.log").open("a", encoding="utf-8") as handle:
+        handle.write(f"{stamp} {line}\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scrape Supply Chain Game and write Excel")
     parser.add_argument("--no-push", action="store_true", help="Write Excel only, do not git push")
     args = parser.parse_args()
-    result = run(push=False if args.no_push else None)
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    try:
+        result = run(push=False if args.no_push else None)
+        _log(f"ok day={result['day']} cash={result['cash']} rank={result['rank']} git={result['git']}")
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    except Exception as exc:
+        _log(f"ERROR {exc}\n{traceback.format_exc()}")
+        raise
 
 
 if __name__ == "__main__":

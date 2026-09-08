@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import html
 import re
+import time
 import urllib.parse
 import urllib.request
 from http.cookiejar import CookieJar
 from typing import Any
+from urllib.error import URLError
 
 from .config import BASE_URL, LOGIN_URL, REGION_NAMES, institution, password, team_id
 
@@ -31,8 +33,16 @@ class GameClient:
             payload = urllib.parse.urlencode(data).encode()
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         req = urllib.request.Request(url, data=payload, headers=headers)
-        with self._opener.open(req, timeout=45) as resp:
-            return resp.read().decode("utf-8", "replace")
+        last_error: Exception | None = None
+        for attempt in range(4):
+            try:
+                with self._opener.open(req, timeout=45) as resp:
+                    return resp.read().decode("utf-8", "replace")
+            except URLError as exc:
+                last_error = exc
+                if attempt < 3:
+                    time.sleep(3 * (attempt + 1))
+        raise last_error or URLError("request failed")
 
     def login(self) -> str:
         tid = team_id()
