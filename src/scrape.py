@@ -91,10 +91,11 @@ def parse_header(page: str) -> dict[str, Any]:
     warehouses = sorted(
         {int(x) for x in re.findall(r"SCWarehouse\?submit=change&region=(\d+)", page)}
     )
+    day_value = _parse_number(day.group(1)) if day else None
     return {
         "team": _clean(name.group(1)) if name else team_id(),
         "cash": _parse_number(cash.group(1) if cash else ""),
-        "day": int(float(_clean(day.group(1)))) if day else None,
+        "day": int(day_value) if day_value is not None else None,
         "factory_regions": factories or [1],
         "warehouse_regions": warehouses or [1],
     }
