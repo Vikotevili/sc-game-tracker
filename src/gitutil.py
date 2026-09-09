@@ -116,11 +116,35 @@ def commit_and_push(paths: list[Path], message: str, do_push: bool) -> dict[str,
     if not has_remote(git):
         return {"status": "committed", "reason": "no_remote"}
 
-    push = _run(git, github_push_args() + ["push", "-u", git_remote(), git_branch()], check=False)
-    if push.returncode != 0:
+    auth = github_push_args()
+    remote = git_remote()
+    branch = git_branch()
+    push = _run(git, auth + ["push", "-u", remote, branch], check=False)
+    if push.returncode == 0:
+        return {"status": "pushed", "reason": "ok"}
+
+    _run(git, auth + ["fetch", remote], check=False)
+    extra = identity_args(git)
+    merged = _run(
+        git,
+        extra + ["merge", "-X", "ours", "--no-edit", f"{remote}/{branch}"],
+        check=False,
+    )
+    if merged.returncode != 0:
+        _run(git, ["merge", "--abort"], check=False)
         return {
             "status": "committed",
             "reason": "push_failed",
-            "detail": (push.stderr or push.stdout).strip(),
+            "detail": (push.stderr or push.stdout).strip()
+            + "\n"
+            + (merged.stderr or merged.stdout).strip(),
         }
-    return {"status": "pushed", "reason": "ok"}
+
+    retry = _run(git, auth + ["push", "-u", remote, branch], check=False)
+    if retry.returncode != 0:
+        return {
+            "status": "committed",
+            "reason": "push_failed",
+            "detail": (retry.stderr or retry.stdout).strip(),
+        }
+    return {"status": "pushed", "reason": "merged_remote"}

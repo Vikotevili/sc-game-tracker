@@ -12,6 +12,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -35,5 +37,10 @@ jobs:
             echo "No workbook changes"
           else
             git commit -m "Update game snapshot"
-            git push
+            if git pull --rebase origin main; then
+              git push
+            else
+              echo "Remote moved; skip push so the laptop tracker can remain source of truth"
+              git rebase --abort || true
+            fi
           fi
