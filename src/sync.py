@@ -23,6 +23,11 @@ def _save_json(report: dict) -> None:
         "factory": report["factory"],
         "warehouse": report["warehouse"],
         "stock": report["stock"],
+        "advice": {
+            "conclusion": (report.get("advice") or {}).get("conclusion"),
+            "urgency": (report.get("advice") or {}).get("urgency"),
+            "action": (report.get("advice") or {}).get("action"),
+        },
         "current_period": report["current_period"],
         "last_complete_period": report["last_complete_period"],
     }
@@ -67,6 +72,7 @@ def run(push: bool | None = None) -> dict:
         "excel": str(excel_path),
         "git": git_result,
         "period": report["current_period"],
+        "advice": report.get("advice"),
     }
 
 

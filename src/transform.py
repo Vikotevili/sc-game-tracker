@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
+from .advice import build_advice
 from .config import (
     GAME_END_DAY,
     MANAGEMENT_START_DAY,
@@ -199,7 +200,7 @@ def build_report(raw: dict[str, Any]) -> dict[str, Any]:
     warehouse = raw["warehouses"][0] if raw.get("warehouses") else {}
     now = datetime.now(timezone.utc).astimezone()
     day = int(raw["day"] or 0)
-    return {
+    report = {
         "fetched_at": now.isoformat(timespec="seconds"),
         "header": raw["header"],
         "day": day,
@@ -221,3 +222,5 @@ def build_report(raw: dict[str, Any]) -> dict[str, Any]:
             "warehouses": [REGION_NAMES.get(r, str(r)) for r in raw["header"].get("warehouse_regions", [])],
         },
     }
+    report["advice"] = build_advice(report)
+    return report

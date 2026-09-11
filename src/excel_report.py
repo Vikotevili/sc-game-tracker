@@ -76,6 +76,18 @@ HISTORY_FORMATS = ["0.00", None, None, None, None, "#,##0.00"]
 STANDING_HEADERS = ["抓取时间", "游戏日", "排名", "队伍", "现金"]
 STANDING_FORMATS = [None, "0", "0", None, '"$"#,##0.00']
 
+ADVICE_HEADERS = [
+    "抓取时间", "游戏日", "结论", "紧急度",
+    "当前运输", "建议运输", "当前订货点", "建议订货点",
+    "当前批量", "建议批量", "当前产能",
+    "请执行", "实测依据", "预测依据", "下次检查",
+]
+ADVICE_FORMATS = [None, "0", None, None, None, None, "#,##0", "#,##0", "#,##0", "#,##0", "0.00", None, None, None, None]
+
+ACTION_FILL = PatternFill("solid", fgColor="F4B183")
+ACTION_NOW_FILL = PatternFill("solid", fgColor="FF6B6B")
+HOLD_FILL = PatternFill("solid", fgColor="C6EFCE")
+
 
 def _style_header(ws: Worksheet, row: int, cols: int) -> None:
     for col in range(1, cols + 1):
@@ -234,6 +246,54 @@ def _daily_values(item: dict[str, Any]) -> list[Any]:
     ]
 
 
+def _advice_fill(urgency: str) -> PatternFill:
+    if urgency == "立即":
+        return ACTION_NOW_FILL
+    if urgency in {"本小时内", "需要改参数"}:
+        return ACTION_FILL
+    return HOLD_FILL
+
+
+def _write_advice_block(ws: Worksheet, report: dict[str, Any]) -> int:
+    advice = report.get("advice") or {}
+    urgency = str(advice.get("urgency") or "暂不改")
+    fill = _advice_fill(urgency)
+    ws["A1"] = "每次抓取后的操作建议（本栏覆盖为最新一次）"
+    ws["A1"].font = TITLE_FONT
+    ws.merge_cells("A1:D1")
+
+    row = 3
+    items = [
+        ("结论", advice.get("conclusion") or "暂无"),
+        ("紧急度", urgency),
+        ("请执行", advice.get("action")),
+        ("运输", f"当前 {advice.get('current_shipping')} → 建议 {advice.get('target_shipping')}"),
+        ("订货点", f"当前 {advice.get('current_rop')} → 建议 {advice.get('target_rop')}"),
+        ("批量", f"当前 {advice.get('current_quantity')} → 建议 {advice.get('target_quantity')}"),
+        ("产能", advice.get("capacity_note")),
+        ("实测依据", advice.get("measured")),
+        ("预测依据", advice.get("forecast")),
+        ("下次检查", advice.get("next_check")),
+    ]
+    start = row
+    for label, value in items:
+        ws.cell(row, 1, label).font = LABEL_FONT
+        cell = ws.cell(row, 2, value)
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+        for col in range(1, 5):
+            ws.cell(row, col).fill = fill
+            ws.cell(row, col).border = THIN
+        if label in {"请执行", "实测依据", "预测依据"}:
+            ws.row_dimensions[row].height = 36
+        row += 1
+    if urgency == "立即":
+        for r in range(start, row):
+            ws.cell(r, 1).font = Font(bold=True, name="Calibri", size=11, color="FFFFFF")
+            ws.cell(r, 2).font = Font(name="Calibri", size=11, color="FFFFFF")
+    return row + 1
+
+
 def _write_overview(wb, report: dict[str, Any]) -> None:
     if "概览" in wb.sheetnames:
         index = wb.sheetnames.index("概览")
@@ -250,13 +310,14 @@ def _write_overview(wb, report: dict[str, Any]) -> None:
     current = report["current_period"] or {}
     last_complete = report["last_complete_period"] or {}
 
-    ws["A1"] = "Supply Chain Game 运营看板（最新）"
-    ws["A1"].font = TITLE_FONT
-    ws.merge_cells("A1:D1")
-    ws["A2"] = "本页只显示最新状态。历史抓取、每日和三日周期都是追加，不会覆盖已有行。"
-    ws.merge_cells("A2:D2")
+    row = _write_advice_block(ws, report)
 
-    row = 4
+    ws.cell(row, 1, "Supply Chain Game 运营看板（最新）").font = TITLE_FONT
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+    row += 1
+    ws.cell(row, 1, "本页最上栏是本次是否改参数。下面状态和历史表都是抓取值。")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+    row += 2
     row = _write_kv(ws, row, "抓取时间", report["fetched_at"])
     row = _write_kv(ws, row, "团队", header.get("team"))
     row = _write_kv(ws, row, "当前游戏日", report["day"], "#,##0")
@@ -320,7 +381,8 @@ def _write_overview(wb, report: dict[str, Any]) -> None:
     ws.cell(row + 1, 1, "时间序列请看「快照历史」「每日数据」「三日周期」。每次抓取只追加新行；已完成的历史行不会被改写。")
     ws.merge_cells(start_row=row + 1, start_column=1, end_row=row + 1, end_column=4)
     _autosize(ws, 16, 42)
-    ws.column_dimensions["B"].width = 28
+    ws.column_dimensions["A"].width = 16
+    ws.column_dimensions["B"].width = 88
 
 
 def _append_snapshot(ws: Worksheet, report: dict[str, Any]) -> None:
@@ -402,6 +464,39 @@ def _append_cash(ws: Worksheet, report: dict[str, Any]) -> None:
             CASH_FORMATS,
             CASH_HEADERS,
         )
+
+
+def _append_advice(ws: Worksheet, report: dict[str, Any]) -> None:
+    advice = report.get("advice") or {}
+    last = _last_used_row(ws)
+    if last > 1 and ws.cell(last, 1).value == report["fetched_at"]:
+        return
+    _write_row(
+        ws,
+        last + 1,
+        [
+            report["fetched_at"],
+            report["day"],
+            advice.get("conclusion"),
+            advice.get("urgency"),
+            advice.get("current_shipping"),
+            advice.get("target_shipping"),
+            advice.get("current_rop"),
+            advice.get("target_rop"),
+            advice.get("current_quantity"),
+            advice.get("target_quantity"),
+            advice.get("current_capacity"),
+            advice.get("action"),
+            advice.get("measured"),
+            advice.get("forecast"),
+            advice.get("next_check"),
+        ],
+        ADVICE_FORMATS,
+        ADVICE_HEADERS,
+    )
+    fill = _advice_fill(str(advice.get("urgency") or ""))
+    for col in range(1, len(ADVICE_HEADERS) + 1):
+        ws.cell(last + 1, col).fill = fill
 
 
 def _append_params(ws: Worksheet, report: dict[str, Any]) -> None:
@@ -491,6 +586,13 @@ def _save_workbook(wb, path: Path) -> Path:
 def write_excel(report: dict[str, Any], path: Path = EXCEL_PATH) -> Path:
     wb = _open_workbook(path)
     _write_overview(wb, report)
+
+    advice_sheet = _ensure_sheet(wb, "策略建议", ADVICE_HEADERS)
+    _append_advice(advice_sheet, report)
+    _autosize(advice_sheet, 12, 48)
+    current = wb.sheetnames.index("策略建议")
+    if current != 1:
+        wb.move_sheet(advice_sheet, offset=1 - current)
 
     snapshot = _ensure_sheet(wb, "快照历史", SNAPSHOT_HEADERS)
     _append_snapshot(snapshot, report)
