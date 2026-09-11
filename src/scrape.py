@@ -34,14 +34,14 @@ class GameClient:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         req = urllib.request.Request(url, data=payload, headers=headers)
         last_error: Exception | None = None
-        for attempt in range(4):
+        for attempt in range(6):
             try:
                 with self._opener.open(req, timeout=45) as resp:
                     return resp.read().decode("utf-8", "replace")
             except URLError as exc:
                 last_error = exc
-                if attempt < 3:
-                    time.sleep(3 * (attempt + 1))
+                if attempt < 5:
+                    time.sleep(5 * (attempt + 1))
         raise last_error or URLError("request failed")
 
     def login(self) -> str:
